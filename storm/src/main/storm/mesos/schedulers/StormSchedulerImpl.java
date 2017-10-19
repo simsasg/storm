@@ -19,6 +19,7 @@ package storm.mesos.schedulers;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.mesos.Protos;
+import org.apache.mesos.SchedulerDriver;
 import org.apache.storm.scheduler.Cluster;
 import org.apache.storm.scheduler.ExecutorDetails;
 import org.apache.storm.scheduler.IScheduler;
@@ -32,7 +33,8 @@ import org.slf4j.LoggerFactory;
 import storm.mesos.resources.AggregatedOffers;
 import storm.mesos.resources.ResourceNotAvailableException;
 import storm.mesos.util.MesosCommon;
-import storm.mesos.util.RotatingMap;
+
+import static storm.mesos.util.PrettyProtobuf.offerMapKeySetToString;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -48,14 +50,33 @@ import java.util.Set;
 /**
  *  Default Scheduler used by mesos-storm framework.
  */
-public class DefaultScheduler implements IScheduler, IMesosStormScheduler {
-  private final Logger log = LoggerFactory.getLogger(DefaultScheduler.class);
+public class StormSchedulerImpl implements IScheduler, IMesosStormScheduler {
+  private final Logger log = LoggerFactory.getLogger(StormSchedulerImpl.class);
   private Map mesosStormConf;
   private final Map<String, MesosWorkerSlot> mesosWorkerSlotMap = new HashMap<>();
+  private volatile boolean offersSuppressed = false;
+  private SchedulerDriver driver;
+  private Set<String> offersRequestTracker = new HashSet<>();
+
+  private StormSchedulerImpl() {
+    // We make this constructor private so that calling it results in a compile time error
+  }
+
+  public StormSchedulerImpl(final SchedulerDriver driver) {
+    this.driver = driver;
+  }
 
   @Override
   public void prepare(Map conf) {
     mesosStormConf = conf;
+  }
+
+  public void addOfferRequest(String key) {
+    offersRequestTracker.add(key);
+  }
+
+  public void removeOfferRequest(String key) {
+    offersRequestTracker.remove(key);
   }
 
   private List<MesosWorkerSlot> getMesosWorkerSlots(Map<String, AggregatedOffers> aggregatedOffersPerNode,
@@ -85,14 +106,21 @@ public class DefaultScheduler implements IScheduler, IMesosStormScheduler {
 
     do {
       slotFound = false;
-      for (String currentNode : aggregatedOffersPerNode.keySet()) {
+      List<String> hostsWithOffers = new ArrayList<String>(aggregatedOffersPerNode.keySet());
+      Collections.shuffle(hostsWithOffers);
+      for (String currentNode : hostsWithOffers) {
         AggregatedOffers aggregatedOffers = aggregatedOffersPerNode.get(currentNode);
 
         boolean supervisorExists = nodesWithExistingSupervisors.contains(currentNode);
 
         if (!aggregatedOffers.isFit(mesosStormConf, topologyDetails, supervisorExists)) {
-          log.info("{} with requestedWorkerCpu {} and requestedWorkerMem {} does not fit onto {} with resources {}",
-                   topologyDetails.getId(), requestedWorkerCpu, requestedWorkerMemInt, aggregatedOffers.getHostname(), aggregatedOffers.toString());
+          if (!supervisorExists) {
+            log.info("{} with requestedWorkerCpu {} and requestedWorkerMem {} plus the requirements to launch a supervisor does not fit onto {} with resources {}",
+                     topologyDetails.getId(), requestedWorkerCpu, requestedWorkerMemInt, aggregatedOffers.getHostname(), aggregatedOffers.toString());
+          } else {
+            log.info("{} with requestedWorkerCpu {} and requestedWorkerMem {} does not fit onto {} with resources {}",
+                     topologyDetails.getId(), requestedWorkerCpu, requestedWorkerMemInt, aggregatedOffers.getHostname(), aggregatedOffers.toString());
+          }
           continue;
         }
 
@@ -134,17 +162,41 @@ public class DefaultScheduler implements IScheduler, IMesosStormScheduler {
    *    passes a recreated version of WorkerSlot to schedule method instead of passing the WorkerSlot returned by this method as is.
     */
   @Override
-  public List<WorkerSlot> allSlotsAvailableForScheduling(RotatingMap<Protos.OfferID, Protos.Offer> offers,
+  public List<WorkerSlot> allSlotsAvailableForScheduling(Map<Protos.OfferID, Protos.Offer> offers,
                                                          Collection<SupervisorDetails> existingSupervisors,
                                                          Topologies topologies, Set<String> topologiesMissingAssignments) {
     if (topologiesMissingAssignments.isEmpty()) {
-      log.info("Declining all offers that are currently buffered because no topologies need assignments");
-      // TODO(ksoundararaj): Do we need to clear offers not that consolidate resources?
-      offers.clear();
+      removeOfferRequest(MesosCommon.TOPOLOGIES_OFFERS_REQUEST_KEY);
+    } else {
+      addOfferRequest(MesosCommon.TOPOLOGIES_OFFERS_REQUEST_KEY);
+    }
+    if (offersRequestTracker.isEmpty()) {
+      if (!offers.isEmpty()) {
+        log.info("Declining all offers that are currently buffered because no topologies nor tasks need assignments. Declined offer ids: {}", offerMapKeySetToString(offers));
+        for (Protos.OfferID offerId : offers.keySet()) {
+          driver.declineOffer(offerId);
+        }
+        offers.clear();
+      }
+      if (!offersSuppressed) {
+        log.info("(SUPPRESS OFFERS) We don't have any topologies nor tasks that need assignments, but offers are still flowing. Suppressing offers.");
+        driver.suppressOffers();
+        offersSuppressed = true;
+      }
       return new ArrayList<>();
     }
 
     log.info("Topologies that need assignments: {}", topologiesMissingAssignments.toString());
+
+    if (offers.isEmpty()) {
+      if (offersSuppressed) {
+        log.info("(REVIVE OFFERS) We have topologies or tasks that need assignments, but offers are currently suppressed. Reviving offers.");
+        driver.reviveOffers();
+        offersSuppressed = false;
+      }
+      // Note: We still have the offersLock at this point, so we return the empty ArrayList so that we can release the lock and acquire new offers
+      return new ArrayList<>();
+    }
 
     List<WorkerSlot> allSlots = new ArrayList<>();
     Map<String, AggregatedOffers> aggregatedOffersPerNode = MesosCommon.getAggregatedOffersPerNode(offers);
@@ -160,7 +212,7 @@ public class DefaultScheduler implements IScheduler, IMesosStormScheduler {
 
       Set<String> nodesWithExistingSupervisors = new HashSet<>();
       for (String currentNode : aggregatedOffersPerNode.keySet()) {
-        if (SchedulerUtils.supervisorExists(currentNode, existingSupervisors, currentTopology)) {
+        if (SchedulerUtils.supervisorExists(MesosCommon.getMesosFrameworkName(mesosStormConf), currentNode, existingSupervisors, currentTopology)) {
           nodesWithExistingSupervisors.add(currentNode);
         }
       }
@@ -215,12 +267,14 @@ public class DefaultScheduler implements IScheduler, IMesosStormScheduler {
     if (slotsRequested == slotsAssigned) {
       if (executors.isEmpty()) {
         // TODO: print executors list cleanly in a single line
-        String msg = String.format("executorsPerWorkerList: for %s, slotsRequested: %d == slotsAssigned: %d, BUT there are unassigned executors which is nonsensical",
-                                   topologyId, slotsRequested, slotsAssigned);
+        String msg = String.format("executorsPerWorkerList: for %s, slotsRequested: %d == slotsAssigned: %d, BUT there are " +
+                     "unassigned executors which is nonsensical",
+                     topologyId, slotsRequested, slotsAssigned);
         log.error(msg);
         throw new RuntimeException(msg);
       }
-      log.debug("executorsPerWorkerList: for {}, slotsRequested: {} == slotsAssigned: {}, so no need to schedule any executors", topologyId, slotsRequested, slotsAssigned);
+      log.debug("executorsPerWorkerList: for {}, slotsRequested: {} == slotsAssigned: {}, so no need to schedule any executors",
+                topologyId, slotsRequested, slotsAssigned);
       return null;
     }
 
@@ -235,11 +289,13 @@ public class DefaultScheduler implements IScheduler, IMesosStormScheduler {
         // Un-assign them
         int slotsFreed = schedulerAssignment.getSlots().size();
         cluster.freeSlots(schedulerAssignment.getSlots());
-        log.info("executorsPerWorkerList: for {}, slotsAvailable: {}, slotsAssigned: {}, slotsFreed: {}", topologyId, slotsAvailable, slotsAssigned, slotsFreed);
+        log.info("executorsPerWorkerList: for {}, slotsAvailable: {}, slotsAssigned: {}, slotsFreed: {}",
+                 topologyId, slotsAvailable, slotsAssigned, slotsFreed);
         executors = cluster.getUnassignedExecutors(topologyDetails);
         slotsToUse = slotsAvailable;
       } else {
-        log.info("All executors are already assigned for {}. Not going to redistribute work because slotsAvailable is {} and slotsAssigned is {}", topologyId, slotsAvailable, slotsAssigned);
+        log.info("All executors are already assigned for {}. Not going to redistribute work because slotsAvailable is {} and slotsAssigned is {}",
+                 topologyId, slotsAvailable, slotsAssigned);
         return null;
       }
     } else {
@@ -304,19 +360,22 @@ public class DefaultScheduler implements IScheduler, IMesosStormScheduler {
   @Override
   public void schedule(Topologies topologies, Cluster cluster) {
     List<WorkerSlot> workerSlots = cluster.getAvailableSlots();
-    String info = "Scheduling the following worker slots from cluster.getAvailableSlots: ";
-    if (workerSlots.isEmpty()) {
-      info += "[]";
-    } else {
+    String info = "";
+
+    if (!workerSlots.isEmpty()) {
+      info = "Scheduling the following worker slots from cluster.getAvailableSlots: ";
       List<String> workerSlotsStrings = new ArrayList<String>();
       for (WorkerSlot ws : workerSlots) {
         workerSlotsStrings.add(ws.toString());
       }
       info += String.format("[%s]", StringUtils.join(workerSlotsStrings, ", "));
+      log.info(info);
     }
-    log.info(info);
 
     Map<String, List<MesosWorkerSlot>> perTopologySlotList = getMesosWorkerSlotPerTopology(workerSlots);
+    if (perTopologySlotList.isEmpty()) {
+      return;
+    }
     info = "Schedule the per-topology slots:";
     for (String topo : perTopologySlotList.keySet()) {
       List<String> mwsAssignments = new ArrayList<>();

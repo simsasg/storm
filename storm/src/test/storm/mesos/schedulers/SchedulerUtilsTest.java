@@ -25,10 +25,11 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.runners.MockitoJUnitRunner;
 import storm.mesos.util.MesosCommon;
-import storm.mesos.util.RotatingMap;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 import static storm.mesos.TestUtils.buildOffer;
@@ -36,28 +37,29 @@ import static storm.mesos.TestUtils.buildOffer;
 @RunWith(MockitoJUnitRunner.class)
 public class SchedulerUtilsTest {
 
-  RotatingMap<OfferID, Offer> rotatingMap;
+  Map<OfferID, Offer> map;
   private final String sampleHost = "host1.east";
 
   @Before
   public void initialize() {
-    rotatingMap = new RotatingMap<>(2);
+    map = new HashMap<OfferID, Offer>();
   }
 
-  private void buildOfferAndUpdateRotatingMap(String offerId, String hostName, double cpus, double memory) {
+  private void buildOfferAndUpdateMap(String offerId, String hostName, double cpus, double memory) {
     Offer offer = buildOffer(offerId, hostName, cpus, memory);
-    rotatingMap.put(offer.getId(), offer);
+    map.put(offer.getId(), offer);
   }
 
   @Test
   public void testSupervisorExists() throws Exception {
     Collection<SupervisorDetails> existingSupervisors = new ArrayList<>();
     String hostName = "host1.east";
+    String frameworkName = "Storm!!!";
 
-    existingSupervisors.add(new SupervisorDetails(MesosCommon.supervisorId(hostName, "test-topology1-65-1442255385"), hostName));
-    existingSupervisors.add(new SupervisorDetails(MesosCommon.supervisorId(hostName, "test-topology10-65-1442255385"), hostName));
+    existingSupervisors.add(new SupervisorDetails(MesosCommon.supervisorId(frameworkName, hostName, "test-topology1-65-1442255385"), hostName));
+    existingSupervisors.add(new SupervisorDetails(MesosCommon.supervisorId(frameworkName, hostName, "test-topology10-65-1442255385"), hostName));
 
-    assertEquals(true, SchedulerUtils.supervisorExists(hostName, existingSupervisors, "test-topology1-65-1442255385"));
-    assertEquals(false, SchedulerUtils.supervisorExists(hostName, existingSupervisors, "test-topology2-65-1442255385"));
+    assertEquals(true, SchedulerUtils.supervisorExists(frameworkName, hostName, existingSupervisors, "test-topology1-65-1442255385"));
+    assertEquals(false, SchedulerUtils.supervisorExists(frameworkName, hostName, existingSupervisors, "test-topology2-65-1442255385"));
   }
 }

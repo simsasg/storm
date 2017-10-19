@@ -27,8 +27,9 @@ import storm.mesos.resources.AggregatedOffers;
 import storm.mesos.resources.ReservationType;
 import storm.mesos.resources.ResourceType;
 import storm.mesos.util.MesosCommon;
-import storm.mesos.util.RotatingMap;
 
+import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -45,6 +46,8 @@ public class MesosCommonTest {
 
   public MesosCommonTest() {
     Map mesosStormConfig = new HashMap<>();
+    mesosStormConfig.put(Config.STORM_ZOOKEEPER_SERVERS, new ArrayList<>(Arrays.asList("localhost")));
+    mesosStormConfig.put(Config.STORM_ZOOKEEPER_PORT, "2181");
     mesosNimbus = new MesosNimbus();
     mesosNimbus.initializeMesosStormConf(mesosStormConfig, "/mock");
   }
@@ -157,10 +160,11 @@ public class MesosCommonTest {
 
   @Test
   public void testSupervisorId() throws Exception {
+    String frameworkName = "Storm!!!";
     String nodeid = "nodeID1";
     String topologyid = "t1";
-    String result = MesosCommon.supervisorId(nodeid, topologyid);
-    String expectedResult = nodeid + "-" + topologyid;
+    String result = MesosCommon.supervisorId(frameworkName, nodeid, topologyid);
+    String expectedResult = frameworkName + "|" + nodeid + "|" + topologyid;
     assertEquals(result, expectedResult);
   }
 
@@ -339,7 +343,7 @@ public class MesosCommonTest {
 
   @Test
   public void aggregatedOffersPerNode() {
-    RotatingMap<Protos.OfferID, Protos.Offer> r = new RotatingMap(2);
+    Map<Protos.OfferID, Protos.Offer> r = new HashMap<Protos.OfferID, Protos.Offer>();
     Protos.Offer offer = TestUtils.buildOffer("0-1", "h1", 0, 0);
     r.put(offer.getId(), offer);
     offer = TestUtils.buildOffer("0-2", "h1", 10, 1000);

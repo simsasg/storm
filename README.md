@@ -14,13 +14,13 @@ To use a release, you first need to unpack the distribution, fill in configurati
 
 # Building
 
-Run build-release.sh to download storm distribution and bundle Storm with this framework into one tar release.
+Run [`bin/build-release.sh`](bin/build-release.sh) to download storm distribution and bundle Storm with this framework into one tar release.
 
 ```shell
-STORM_RELEASE=0.X.X MESOS_RELEASE=0.Y.Y bin/build-release.sh
+STORM_RELEASE=X.X.X MESOS_RELEASE=Y.Y.Y bin/build-release.sh
 ```
 
-Where 0.X.X and 0.Y.Y are the respective versions of Storm and Mesos you wish to build against.  This will build a Mesos executor package.  You'll need to edit `storm.yaml` and supply the Mesos master configuration as well as the executor package URI (produced by the step above).
+Where `X.X.X` and `Y.Y.Y` are the respective versions of Storm and Mesos you wish to build against.  This will build a Mesos executor package.  You'll need to edit `storm.yaml` and supply the Mesos master configuration as well as the executor package URI (produced by the step above).
 
 ## Sub-commands
 
@@ -71,22 +71,22 @@ In order to build the storm-mesos docker image, or a docker image ready to be us
 
 ```shell
 make help
-make images STORM_RELEASE=0.X.X MESOS_RELEASE=0.Y.Y DOCKER_REPO=mesos/storm
+make images STORM_RELEASE=X.X.X MESOS_RELEASE=Y.Y.Y DOCKER_REPO=mesos/storm
 ```
 
-Where 0.X.X and 0.Y.Y are the respective versions of Storm and Mesos you wish to build against.  This will build a docker image containing a Mesos executor package. The resulting docker images are the following:
+Where X.X.X and Y.Y.Y are the respective versions of Storm and Mesos you wish to build against.  This will build a docker image containing a Mesos executor package. The resulting docker images are the following:
 
 ```
 ± docker images
 REPOSITORY                TAG                                    IMAGE ID            CREATED 
-mesos/storm               0.1.0-0.X.X-0.Y.Y-jdk7                 11989e7bfa17        44 minutes ago
-mesos/storm               0.1.0-0.X.X-0.Y.Y-jdk7-onbuild         e7eb52b3eb9f        44 minutes ago
+mesos/storm               0.1.0-X.X.X-Y.Y.Y-jdk7                 11989e7bfa17        44 minutes ago
+mesos/storm               0.1.0-X.X.X-Y.Y.Y-jdk7-onbuild         e7eb52b3eb9f        44 minutes ago
 ```
 
 In order to use JDK 8 while building the docker image, run the following:
 
 ```shell
-make images STORM_RELEASE=0.X.X MESOS_RELEASE=0.Y.Y DOCKER_REPO=mesos/storm JAVA_PRODUCT_VERSION=8
+make images STORM_RELEASE=X.X.X MESOS_RELEASE=Y.Y.Y DOCKER_REPO=mesos/storm JAVA_PRODUCT_VERSION=8
 ```
 
 A custom image could be built from the onbuild tagged docker image. It is based on the dockerfile ``onbuild/Dockerfile``
@@ -94,6 +94,20 @@ A custom image could be built from the onbuild tagged docker image. It is based 
 Images are also published to Docker Hub under the image `mesos/storm` at <https://hub.docker.com/r/mesos/storm/>.
 
 # Releasing New Version
+
+## Select the Branch
+
+Note that normally your local repo should be synced to the HEAD of [`github.com:mesos/storm`'s master branch](https://github.com/mesos/storm/tree/master).  However, it is possible that you're working from a different branch and doing releases for an earlier numbered version, per the [branching regime](https://github.com/mesos/storm/issues/128#issuecomment-222835660) we created for handling backwards-incompatible changes in Storm (such as the package path change from `backtype.storm.*` to `org.apache.storm.*` in Storm 1.0, and the [`LocalState` implementation change in Storm 0.10](https://github.com/apache/storm/commit/b1dc422bd502ad031d027ba0c026c3e666abe42f#diff-437638c20d4ef66fa4e866a8316c3919)).
+
+### Storm v1.x
+
+Just use the `master` branch.
+
+### Storm v0.x (e.g., v0.9.6)
+
+Check out `storm-0.x` branch, ensuring you are up-to-date with the latest changes in the [remote base repo's storm-0.x branch](https://github.com/mesos/storm/tree/storm-0.x).
+
+## Generate Release
 
 If you are a committer for this repo, then you merely need to run the following command to generate a new release:
 
@@ -103,7 +117,6 @@ mvn release:clean release:prepare
 
 This will automatically update the version fields and push tags that in turn kick off a travis-ci build.  This travis-ci build automatically uploads the resultant artifacts to both [GitHub](https://github.com/mesos/storm/releases) and [DockerHub](https://hub.docker.com/r/mesos/storm/tags/).
 
-Note that normally your local repo should be synced to the HEAD of github.com:mesos/storm's master branch.  However it is possible that you're working from a different branch and doing releases for an earlier numbered version.  [That variant process](https://github.com/mesos/storm/issues/128#issuecomment-209251763) will soon exist as part of [supporting both storm-0.x and storm-1.x+](https://github.com/mesos/storm/issues/128#issuecomment-222835660), but needs to be ironed out.
 
 # Running Storm on Mesos
 Along with the Mesos master and Mesos cluster, you'll need to run the Storm master as well. Launch Nimbus with this command:
@@ -157,6 +170,7 @@ For local development and familiarizing yourself with Storm/Mesos, please see th
 * `mesos.nimbus.leader.check.period.secs`: Nimbus leader check task period in seconds. Defaults to "60".
 * `mesos.local.file.server.port`: Port for the local file server to bind to. Defaults to a random port.
 * `mesos.framework.name`: Framework name. Defaults to "Storm!!!".
+* `mesos.framework.user`: Framework user to run with Mesos. Defaults to user to run with Storm on Mesos.
 * `mesos.framework.principal`: Framework principal to use to register with Mesos
 * `mesos.framework.secret.file`:  Location of file that contains the principal's secret. Secret cannot end with a NL.
 * `mesos.prefer.reserved.resources`: Prefer reserved resources over unreserved (i.e., `"*"` role). Defaults to "true".
@@ -220,12 +234,15 @@ You can run this from Marathon, using the example app JSON below:
 ```
 ## Running an example topology
 
-Once Nimbus is running, you can launch one of the `storm-starter` topologies. In order to submit the topology
-to Nimbus, you'll need to know the Thrift host and API port. In the Marathon example above, the port will be the second
+Once Nimbus is running, you can launch one of the `storm-starter` topologies that is present in the `examples/` dir of the [storm release tarballs](https://storm.apache.org/downloads.html).
+So you'd download the appropriate version of storm to a machine with access to your storm cluster, then expand the tarball
+and `cd` into the resultant directory, from which you will run a command like the one below.
+
+However, first you'll need to know the Thrift host and API port. In the Marathon example above, the port will be the second
 one assigned by Marathon. For example, if the host is `10.0.0.1` and second port is `32001`, run:
 
 ```
-$ ./bin/storm jar -c nimbus.host=10.0.0.1 -c nimbus.thrift.port=32001 examples/storm-starter/storm-starter-topologies-0.9.6.jar storm.starter.WordCountTopology word-count
+$ ./bin/storm jar -c nimbus.host=10.0.0.1 -c nimbus.thrift.port=32001 examples/storm-starter/storm-starter-topologies-1.0.2.jar org.apache.storm.starter.WordCountTopology word-count
 ```
 
 ## Running without Marathon

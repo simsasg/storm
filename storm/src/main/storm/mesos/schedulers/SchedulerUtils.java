@@ -17,7 +17,6 @@
  */
 package storm.mesos.schedulers;
 
-import org.apache.mesos.Protos;
 import org.apache.storm.scheduler.SupervisorDetails;
 import org.apache.storm.scheduler.TopologyDetails;
 import org.slf4j.Logger;
@@ -92,9 +91,9 @@ public class SchedulerUtils {
    * @param topologyId ID of topology requiring assignment
    * @return boolean value indicating supervisor existence
    */
-  public static boolean supervisorExists(String offerHost, Collection<SupervisorDetails> existingSupervisors,
+  public static boolean supervisorExists(String frameworkName, String offerHost, Collection<SupervisorDetails> existingSupervisors,
                                    String topologyId) {
-    String expectedSupervisorId = MesosCommon.supervisorId(offerHost, topologyId);
+    String expectedSupervisorId = MesosCommon.supervisorId(frameworkName, offerHost, topologyId);
     for (SupervisorDetails supervisorDetail : existingSupervisors) {
       if (supervisorDetail.getId().equals(expectedSupervisorId)) {
         return true;

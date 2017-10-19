@@ -126,13 +126,30 @@ public class PrettyProtobuf {
    * have inconsistent output since the _offers map is touched from both
    * mesos-driven events and storm-driven calls.
    * <p/>
-   * TODO:(erikdw): figure out a design better that removes the need
+   * TODO:(erikdw): figure out a better design that removes the need
    * for external callers to lock before calling this method.
    */
-  public static String offerMapToString(RotatingMap<OfferID, Offer> offers) {
+  public static String offerMapToString(Map<OfferID, Offer> offers) {
     List<String> offersAsStrings = Lists.transform(new ArrayList<Offer>(offers.values()),
                                                    offerToStringTransform);
     return String.format("[\n%s]", StringUtils.join(offersAsStrings, ",\n"));
+  }
+
+  /**
+   * Pretty-print the key set of the Offer map used in MesosNimbus.
+   * <p/>
+   * Callers must ensure they have locked the Map first, else they could
+   * have inconsistent output since the _offers map is touched from both
+   * mesos-driven events and storm-driven calls.
+   * <p/>
+   * TODO:(erikdw): implement same fix as required for offerMapToString.
+   */
+  public static String offerMapKeySetToString(Map<OfferID, Offer> offers) {
+    ArrayList<String> offerIdList = new ArrayList<String>();
+    for (OfferID offerId : offers.keySet()) {
+      offerIdList.add(offerId.getValue());
+    }
+    return String.format("[%s]", StringUtils.join(offerIdList, ", "));
   }
 
   /**
@@ -244,5 +261,17 @@ public class PrettyProtobuf {
   public static String offerIDListToString(List<OfferID> offerIDList) {
     List<String> offerIDsAsStrings = Lists.transform(offerIDList, offerIDToStringTransform);
     return String.format("[%s]", StringUtils.join(offerIDsAsStrings, ", "));
+  }
+
+  private static Function<TaskStatus, String> taskStatusToTaskIDStringTransform =
+      new Function<TaskStatus, String>() {
+        public String apply(TaskStatus t) {
+          return String.format("\"%s\"", t.getTaskId().getValue().toString());
+        }
+      };
+
+  public static String taskStatusListToTaskIDsString(List<TaskStatus> taskStatusList) {
+    List<String> taskIDsAsStrings = Lists.transform(taskStatusList, taskStatusToTaskIDStringTransform);
+    return String.format("[%s]", StringUtils.join(taskIDsAsStrings, ", "));
   }
 }
