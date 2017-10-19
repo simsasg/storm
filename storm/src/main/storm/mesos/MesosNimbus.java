@@ -17,9 +17,6 @@
  */
 package storm.mesos;
 
-<<<<<<< HEAD
-=======
-import com.google.protobuf.InvalidProtocolBufferException;
 import org.apache.storm.Config;
 import org.apache.storm.scheduler.INimbus;
 import org.apache.storm.scheduler.IScheduler;
@@ -27,7 +24,6 @@ import org.apache.storm.scheduler.SupervisorDetails;
 import org.apache.storm.scheduler.Topologies;
 import org.apache.storm.scheduler.TopologyDetails;
 import org.apache.storm.scheduler.WorkerSlot;
->>>>>>> master
 import com.google.common.base.Optional;
 import com.google.protobuf.ByteString;
 import org.apache.commons.lang3.StringUtils;
@@ -52,15 +48,8 @@ import org.apache.mesos.Protos.Value.Ranges;
 import org.apache.mesos.Protos.Value.Scalar;
 import org.apache.mesos.Protos.TaskState;
 import org.apache.mesos.SchedulerDriver;
-import org.apache.storm.Config;
 import org.apache.storm.generated.ClusterSummary;
 import org.apache.storm.generated.NimbusSummary;
-import org.apache.storm.scheduler.INimbus;
-import org.apache.storm.scheduler.IScheduler;
-import org.apache.storm.scheduler.SupervisorDetails;
-import org.apache.storm.scheduler.Topologies;
-import org.apache.storm.scheduler.TopologyDetails;
-import org.apache.storm.scheduler.WorkerSlot;
 import org.apache.storm.utils.NimbusClient;
 import org.json.simple.JSONValue;
 import org.slf4j.Logger;
@@ -317,8 +306,7 @@ public class MesosNimbus implements INimbus {
         _driver.reconcileTasks(taskStatuses);
         LOG.info("Performing task reconciliation between scheduler and master on following tasks: {}", taskStatusListToTaskIDsString(taskStatuses));
       }
-<<<<<<< HEAD
-    }, 0, Math.round(1000 * expiryMultiplier.doubleValue() * offerExpired.intValue()));
+    }, 0, TASK_RECONCILIATION_INTERVAL); // reconciliation performed every 5 minutes
 
     /**
      * If you want to run several HA nimbus instances mesos will see them as frameworks.
@@ -356,8 +344,8 @@ public class MesosNimbus implements INimbus {
   private void declineAllOffers() {
     LOG.warn("Declining all existing offers.");
     synchronized (_offersLock) {
-      for (int i = 0; i < _offers.size(); i++) {
-        _offers.rotate();
+      for (Protos.OfferID offerId : _offers.keySet()) {
+        _driver.declineOffer(offerId);
       }
     }
   }
@@ -376,9 +364,6 @@ public class MesosNimbus implements INimbus {
       LOG.error("Received fatal error while getting nimbus leader", t);
     }
     return false;
-=======
-    }, 0, TASK_RECONCILIATION_INTERVAL); // reconciliation performed every 5 minutes
->>>>>>> master
   }
 
   public void shutdown() throws Exception {
