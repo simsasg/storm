@@ -143,6 +143,7 @@ public class MesosNimbus implements INimbus {
   private boolean _offersRevived = false;
   private boolean _offersSupressed = false;
   private boolean _preferReservedResources = true;
+  private boolean _enabledLogviewerSidecar = true;
   private Optional<String> _container = Optional.absent();
   private Path _generatedConfPath;
 
@@ -225,20 +226,23 @@ public class MesosNimbus implements INimbus {
 
     _allowedHosts = listIntoSet((List<String>) conf.get(CONF_MESOS_ALLOWED_HOSTS));
     _disallowedHosts = listIntoSet((List<String>) conf.get(CONF_MESOS_DISALLOWED_HOSTS));
+    _enabledLogviewerSidecar = MesosCommon.enabledLogviewerSidecar(conf);
 
-    Set<String> zkServerSet = listIntoSet((List<String>) conf.get(Config.STORM_ZOOKEEPER_SERVERS));
-    String zkPort = String.valueOf(conf.get(Config.STORM_ZOOKEEPER_PORT));
-    _logviewerZkDir = Optional.fromNullable((String) conf.get(Config.STORM_ZOOKEEPER_ROOT)).or("") + "/storm-mesos/logviewers";
-    LOG.info("Logviewer information will be stored under {}", _logviewerZkDir);
+    if (_enabledLogviewerSidecar) {
+      Set<String> zkServerSet = listIntoSet((List<String>) conf.get(Config.STORM_ZOOKEEPER_SERVERS));
+      String zkPort = String.valueOf(conf.get(Config.STORM_ZOOKEEPER_PORT));
+      _logviewerZkDir = Optional.fromNullable((String) conf.get(Config.STORM_ZOOKEEPER_ROOT)).or("") + "/storm-mesos/logviewers";
+      LOG.info("Logviewer information will be stored under {}", _logviewerZkDir);
 
-    if (zkPort == null || zkServerSet == null) {
-      throw new RuntimeException("ZooKeeper configs are not found in storm.yaml: " + Config.STORM_ZOOKEEPER_SERVERS + ", " + Config.STORM_ZOOKEEPER_PORT);
-    } else {
-      List<String> zkConnectionList = new ArrayList<>();
-      for (String server : zkServerSet) {
-        zkConnectionList.add(String.format("%s:%s", server, zkPort));
+      if (zkPort == null || zkServerSet == null) {
+        throw new RuntimeException("ZooKeeper configs are not found in storm.yaml: " + Config.STORM_ZOOKEEPER_SERVERS + ", " + Config.STORM_ZOOKEEPER_PORT);
+      } else {
+        List<String> zkConnectionList = new ArrayList<>();
+        for (String server : zkServerSet) {
+          zkConnectionList.add(String.format("%s:%s", server, zkPort));
+        }
+        _zkClient = new ZKClient(StringUtils.join(zkConnectionList, ','));
       }
-      _zkClient = new ZKClient(StringUtils.join(zkConnectionList, ','));
     }
 
     Boolean preferReservedResources = (Boolean) conf.get(CONF_MESOS_PREFER_RESERVED_RESOURCES);
@@ -282,89 +286,92 @@ public class MesosNimbus implements INimbus {
     _state.put(FRAMEWORK_ID, id.getValue());
     _offers = new HashMap<Protos.OfferID, Protos.Offer>();
 
-    _timer.scheduleAtFixedRate(new TimerTask() {
-      @Override
-      public void run() {
-        // performing "explicit" reconciliation; master will respond with the latest state for all logviewer tasks
-        // in the framework scheduler's statusUpdate() method
-        List<TaskStatus> taskStatuses = new ArrayList<TaskStatus>();
-        List<String> logviewerPaths = _zkClient.getChildren(_logviewerZkDir);
-        if (logviewerPaths == null) {
+    if (_enabledLogviewerSidecar) {
+
+      _timer.scheduleAtFixedRate(new TimerTask() {
+        @Override
+        public void run() {
+          // performing "explicit" reconciliation; master will respond with the latest state for all logviewer tasks
+          // in the framework scheduler's statusUpdate() method
+          List<TaskStatus> taskStatuses = new ArrayList<TaskStatus>();
+          List<String> logviewerPaths = _zkClient.getChildren(_logviewerZkDir);
+          if (logviewerPaths == null) {
+            _driver.reconcileTasks(taskStatuses);
+            return;
+          }
+          for (String path : logviewerPaths) {
+            TaskID logviewerTaskId = TaskID.newBuilder()
+                                           .setValue(new String(_zkClient.getNodeData(String.format("%s/%s", _logviewerZkDir, path))))
+                                           .build();
+            TaskStatus logviewerTaskStatus = TaskStatus.newBuilder()
+                                                       .setTaskId(logviewerTaskId)
+                                                       .setState(TaskState.TASK_RUNNING)
+                                                       .build();
+            taskStatuses.add(logviewerTaskStatus);
+          }
           _driver.reconcileTasks(taskStatuses);
-          return;
+          LOG.info("Performing task reconciliation between scheduler and master on following tasks: {}", taskStatusListToTaskIDsString(taskStatuses));
         }
-        for (String path : logviewerPaths) {
-          TaskID logviewerTaskId = TaskID.newBuilder()
-                                          .setValue(new String(_zkClient.getNodeData(String.format("%s/%s", _logviewerZkDir, path))))
-                                          .build();
-          TaskStatus logviewerTaskStatus = TaskStatus.newBuilder()
-                                                     .setTaskId(logviewerTaskId)
-                                                     .setState(TaskState.TASK_RUNNING)
-                                                     .build();
-          taskStatuses.add(logviewerTaskStatus);
-        }
-        _driver.reconcileTasks(taskStatuses);
-        LOG.info("Performing task reconciliation between scheduler and master on following tasks: {}", taskStatusListToTaskIDsString(taskStatuses));
-      }
     }, 0, TASK_RECONCILIATION_INTERVAL); // reconciliation performed every 5 minutes
+  }
 
-    /**
-     * If you want to run several HA nimbus instances mesos will see them as frameworks.
-     *   Mesos master generates offers to all registered frameworks using Dominant Resource Fairness algorithm.
-     *   Offers are held by storm-mesos framework even if nimbus is not leader and this can cause resource starvation in cluster,
-     *   because remaining offers will be held by other storm frameworks.
-     *   The solution is to `suppressOffers` for non leader frameworks and `reviveOffers` only for nimbus leader.
-     *   If new nimbus leader will be elected this task would `reviveOffers` for new leader.
-     */
-    Number nimbusLeaderCheckDelay = Optional.fromNullable((Number) mesosStormConf.get(CONF_MESOS_NIMBUS_LEADER_CHECK_DELAY)).or(120 * 1000);
-    Number nimbusLeaderCheckPeriod = Optional.fromNullable((Number) mesosStormConf.get(CONF_MESOS_NIMBUS_LEADER_CHECK_PERIOD)).or(60 * 1000);
-    _timer.scheduleAtFixedRate(new TimerTask() {
-      @Override
-      public void run() {
-        if (isThisNimbusLeader()) {
-          if (!_offersRevived) {
-            LOG.info("Nimbus is leader. Reviving offers.");
-            driver.reviveOffers();
-            _offersRevived = true;
-            _offersSupressed = false;
+      /**
+       * If you want to run several HA nimbus instances mesos will see them as frameworks.
+       *   Mesos master generates offers to all registered frameworks using Dominant Resource Fairness algorithm.
+       *   Offers are held by storm-mesos framework even if nimbus is not leader and this can cause resource starvation in cluster,
+       *   because remaining offers will be held by other storm frameworks.
+       *   The solution is to `suppressOffers` for non leader frameworks and `reviveOffers` only for nimbus leader.
+       *   If new nimbus leader will be elected this task would `reviveOffers` for new leader.
+       */
+      Number nimbusLeaderCheckDelay = Optional.fromNullable((Number) mesosStormConf.get(CONF_MESOS_NIMBUS_LEADER_CHECK_DELAY)).or(120 * 1000);
+      Number nimbusLeaderCheckPeriod = Optional.fromNullable((Number) mesosStormConf.get(CONF_MESOS_NIMBUS_LEADER_CHECK_PERIOD)).or(60 * 1000);
+      _timer.scheduleAtFixedRate(new TimerTask() {
+          @Override
+          public void run() {
+              if (isThisNimbusLeader()) {
+                  if (!_offersRevived) {
+                      LOG.info("Nimbus is leader. Reviving offers.");
+                      driver.reviveOffers();
+                      _offersRevived = true;
+                      _offersSupressed = false;
+                  }
+              } else {
+                  if (!_offersSupressed) {
+                      LOG.warn("Nimbus is not a leader. Suppressing offers.");
+                      driver.suppressOffers();
+                      declineAllOffers();
+                      _offersSupressed = true;
+                      _offersRevived = false;
+                  }
+              }
           }
-        } else {
-          if (!_offersSupressed) {
-            LOG.warn("Nimbus is not a leader. Suppressing offers.");
-            driver.suppressOffers();
-            declineAllOffers();
-            _offersSupressed = true;
-            _offersRevived = false;
-          }
-        }
-      }
-    }, 1000 * nimbusLeaderCheckDelay.intValue(), 1000 * nimbusLeaderCheckPeriod.intValue());
+      }, 1000 * nimbusLeaderCheckDelay.intValue(), 1000 * nimbusLeaderCheckPeriod.intValue());
   }
 
-  private void declineAllOffers() {
-    LOG.warn("Declining all existing offers.");
-    synchronized (_offersLock) {
-      for (Protos.OfferID offerId : _offers.keySet()) {
-        _driver.declineOffer(offerId);
-      }
-    }
-  }
-
-  private Boolean isThisNimbusLeader() {
-    try {
-      ClusterSummary clusterSummary = NimbusClient.getConfiguredClient(this.mesosStormConf).getClient().getClusterInfo();
-      for (NimbusSummary nimbus : clusterSummary.get_nimbuses()) {
-        String currentHostname = InetAddress.getLocalHost().getCanonicalHostName();
-        if (nimbus.get_host().equals(currentHostname)) {
-          LOG.debug("Nimbus is running on host {}. It's leader status {}", currentHostname, nimbus.is_isLeader());
-          return nimbus.is_isLeader();
+    private void declineAllOffers() {
+        LOG.warn("Declining all existing offers.");
+        synchronized (_offersLock) {
+            for (Protos.OfferID offerId : _offers.keySet()) {
+                _driver.declineOffer(offerId);
+            }
         }
-      }
-    } catch (Throwable t) {
-      LOG.error("Received fatal error while getting nimbus leader", t);
     }
-    return false;
-  }
+
+    private Boolean isThisNimbusLeader() {
+        try {
+            ClusterSummary clusterSummary = NimbusClient.getConfiguredClient(this.mesosStormConf).getClient().getClusterInfo();
+            for (NimbusSummary nimbus : clusterSummary.get_nimbuses()) {
+                String currentHostname = InetAddress.getLocalHost().getCanonicalHostName();
+                if (nimbus.get_host().equals(currentHostname)) {
+                    LOG.debug("Nimbus is running on host {}. It's leader status {}", currentHostname, nimbus.is_isLeader());
+                    return nimbus.is_isLeader();
+                }
+            }
+        } catch (Throwable t) {
+            LOG.error("Received fatal error while getting nimbus leader", t);
+        }
+        return false;
+    }
 
   public void shutdown() throws Exception {
     _httpServer.shutdown();
@@ -446,7 +453,7 @@ public class MesosNimbus implements INimbus {
        *  Not currently supporting automated logviewer launch for Docker containers
        *  ISSUE #215: https://github.com/mesos/storm/issues/215
        */
-      if (!_container.isPresent()) {
+      if (_enabledLogviewerSidecar && !_container.isPresent()) {
         launchLogviewer(existingSupervisors);
       }
       return _stormScheduler.allSlotsAvailableForScheduling(
