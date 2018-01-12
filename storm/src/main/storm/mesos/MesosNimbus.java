@@ -312,66 +312,66 @@ public class MesosNimbus implements INimbus {
           _driver.reconcileTasks(taskStatuses);
           LOG.info("Performing task reconciliation between scheduler and master on following tasks: {}", taskStatusListToTaskIDsString(taskStatuses));
         }
-    }, 0, TASK_RECONCILIATION_INTERVAL); // reconciliation performed every 5 minutes
-  }
+      }, 0, TASK_RECONCILIATION_INTERVAL); // reconciliation performed every 5 minutes
+    }
 
-      /**
-       * If you want to run several HA nimbus instances mesos will see them as frameworks.
-       *   Mesos master generates offers to all registered frameworks using Dominant Resource Fairness algorithm.
-       *   Offers are held by storm-mesos framework even if nimbus is not leader and this can cause resource starvation in cluster,
-       *   because remaining offers will be held by other storm frameworks.
-       *   The solution is to `suppressOffers` for non leader frameworks and `reviveOffers` only for nimbus leader.
-       *   If new nimbus leader will be elected this task would `reviveOffers` for new leader.
-       */
-      Number nimbusLeaderCheckDelay = Optional.fromNullable((Number) mesosStormConf.get(CONF_MESOS_NIMBUS_LEADER_CHECK_DELAY)).or(120 * 1000);
-      Number nimbusLeaderCheckPeriod = Optional.fromNullable((Number) mesosStormConf.get(CONF_MESOS_NIMBUS_LEADER_CHECK_PERIOD)).or(60 * 1000);
-      _timer.scheduleAtFixedRate(new TimerTask() {
-          @Override
-          public void run() {
-              if (isThisNimbusLeader()) {
-                  if (!_offersRevived) {
-                      LOG.info("Nimbus is leader. Reviving offers.");
-                      driver.reviveOffers();
-                      _offersRevived = true;
-                      _offersSupressed = false;
-                  }
-              } else {
-                  if (!_offersSupressed) {
-                      LOG.warn("Nimbus is not a leader. Suppressing offers.");
-                      driver.suppressOffers();
-                      declineAllOffers();
-                      _offersSupressed = true;
-                      _offersRevived = false;
-                  }
-              }
+    /**
+     * If you want to run several HA nimbus instances mesos will see them as frameworks.
+     *   Mesos master generates offers to all registered frameworks using Dominant Resource Fairness algorithm.
+     *   Offers are held by storm-mesos framework even if nimbus is not leader and this can cause resource starvation in cluster,
+     *   because remaining offers will be held by other storm frameworks.
+     *   The solution is to `suppressOffers` for non leader frameworks and `reviveOffers` only for nimbus leader.
+     *   If new nimbus leader will be elected this task would `reviveOffers` for new leader.
+     */
+    Number nimbusLeaderCheckDelay = Optional.fromNullable((Number) mesosStormConf.get(CONF_MESOS_NIMBUS_LEADER_CHECK_DELAY)).or(120 * 1000);
+    Number nimbusLeaderCheckPeriod = Optional.fromNullable((Number) mesosStormConf.get(CONF_MESOS_NIMBUS_LEADER_CHECK_PERIOD)).or(60 * 1000);
+    _timer.scheduleAtFixedRate(new TimerTask() {
+      @Override
+      public void run() {
+        if (isThisNimbusLeader()) {
+          if (!_offersRevived) {
+            LOG.info("Nimbus is leader. Reviving offers.");
+            driver.reviveOffers();
+            _offersRevived = true;
+            _offersSupressed = false;
           }
-      }, 1000 * nimbusLeaderCheckDelay.intValue(), 1000 * nimbusLeaderCheckPeriod.intValue());
+        } else {
+          if (!_offersSupressed) {
+            LOG.warn("Nimbus is not a leader. Suppressing offers.");
+            driver.suppressOffers();
+            declineAllOffers();
+            _offersSupressed = true;
+            _offersRevived = false;
+          }
+        }
+      }
+    }, 1000 * nimbusLeaderCheckDelay.intValue(), 1000 * nimbusLeaderCheckPeriod.intValue());
   }
 
-    private void declineAllOffers() {
-        LOG.warn("Declining all existing offers.");
-        synchronized (_offersLock) {
-            for (Protos.OfferID offerId : _offers.keySet()) {
-                _driver.declineOffer(offerId);
-            }
-        }
+  private void declineAllOffers() {
+    LOG.warn("Declining all existing offers.");
+    synchronized (_offersLock) {
+      for (Protos.OfferID offerId : _offers.keySet()) {
+        _driver.declineOffer(offerId);
+      }
     }
+  }
 
-    private Boolean isThisNimbusLeader() {
-        try {
-            ClusterSummary clusterSummary = NimbusClient.getConfiguredClient(this.mesosStormConf).getClient().getClusterInfo();
-            for (NimbusSummary nimbus : clusterSummary.get_nimbuses()) {
-                String currentHostname = InetAddress.getLocalHost().getCanonicalHostName();
-                if (nimbus.get_host().equals(currentHostname)) {
-                    LOG.debug("Nimbus is running on host {}. It's leader status {}", currentHostname, nimbus.is_isLeader());
-                    return nimbus.is_isLeader();
-                }
-            }
-        } catch (Throwable t) {
-            LOG.error("Received fatal error while getting nimbus leader", t);
+  private Boolean isThisNimbusLeader() {
+    try {
+      ClusterSummary clusterSummary = NimbusClient.getConfiguredClient(this.mesosStormConf).getClient().getClusterInfo();
+      for (NimbusSummary nimbus : clusterSummary.get_nimbuses()) {
+        String currentHostname = InetAddress.getLocalHost().getCanonicalHostName();
+        if (nimbus.get_host().equals(currentHostname)) {
+          LOG.debug("Nimbus is running on host {}. It's leader status {}", currentHostname, nimbus.is_isLeader());
+          return nimbus.is_isLeader();
         }
-        return false;
+      }
+    } catch (Throwable t) {
+      LOG.error("Received fatal error while getting nimbus leader", t);
     }
+    return false;
+  }
 
   public void shutdown() throws Exception {
     _httpServer.shutdown();
